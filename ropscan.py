@@ -5,7 +5,8 @@ from capstone import *
 from capstone.x86 import *
 
 MAX_GADGET_LEN = 4
-GADGET_GROUPS = [X86_GRP_CALL, X86_GRP_RET, X86_GRP_INT]
+GADGET_GROUPS = [X86_GRP_RET, X86_GRP_INT]
+MAX_GADGETS = 5000
 
 def printHelp():
     print("Usage: ropscan [binary]")
@@ -16,6 +17,17 @@ def printGadgets(gadgets):
             print("0x%x:\t%s\t%s [%d]" % (g.address, g.mnemonic, g.op_str, g.id))
     print("\n")
 
+def serializeInstructions(gadget):
+    seq = list()
+    for i in gadget:
+        if i: #skip None
+            tup = (i.id, i.op_str)
+            seq.append(tup)
+
+    h = hash(tuple(seq))
+    #print("seq: %s, hash: %d" % (str(tuple(seq)), h))
+    return h
+
 def getGroup(i):
     if i.groups:
         for group in i.groups:
@@ -24,28 +36,32 @@ def getGroup(i):
     return None
 
 def scan(roplen, data):
-    gadgets = collections.deque([None]*roplen, roplen)
+    count = 0
+    gadget = collections.deque([None]*roplen, roplen)
     d = dict()
     for t in GADGET_GROUPS:
-        d[t] = list()
+        d[t] = (set(), list())
 
     md = Cs(CS_ARCH_X86, CS_MODE_32) #TODO detect architecture automatically?
     md.detail = True
 
-    for offset in range(0, len(data)): #disassemble at every offset
+    for offset in range(0, 5): #disassemble at every offset?
         #print("[*] Offset %d\n" % offset)
-
-        for i in md.disasm(data, offset):
-            gadgets.append(i)
+        instructions = md.disasm(data, offset)
+        for i in instructions:
+            gadget.append(i)
             group = getGroup(i)
-            #print("0x%x:\t%s\t%s [%d]" % (i.address, i.mnemonic, i.op_str, i.id))
-            if group:
-                printGadgets(gadgets)
-                d[group].append(list(gadgets))
-                gadgets = collections.deque([None]*roplen, roplen) #reset
-            else:
-                if i.id == X86_INS_RET:
-                    print("Ret instruction found: %s" + str(i))
+            seq = serializeInstructions(list(gadget))
+            print("0x%x:\t%s\t%s [%d]" % (i.address, i.mnemonic, i.op_str, i.id))
+            if group and seq not in d[group][0]:
+                #printGadgets(gadgets)
+                #print("Adding seq")
+                d[group][0].add(seq)
+                d[group][1].append(list(gadget))
+                gadget = collections.deque([None]*roplen, roplen) #reset
+                count += 1
+                if count > MAX_GADGETS:
+                    return d
 
     return d
 
@@ -59,6 +75,27 @@ def main():
         data = f.read()
 
     gadgets = scan(MAX_GADGET_LEN, data)
+
+    with open("gadgets.txt", "w") as f:
+        for group, tup in gadgets.iteritems():
+            gadgetList = tup[1]
+            if len(gadgetList) <= 0:
+                continue
+            f.write("---------------------------------------------------------------------------\n")
+            for g in gadgetList:
+                baseAddr = None
+                s = ""
+                for i in g:
+                    if i:
+                        if not baseAddr:
+                            baseAddr = i.address
+                        s += " %s %s ;" % (i.mnemonic, i.op_str)
+                        #s = "0x%x:\t%s\t%s\n" % (i.address, i.mnemonic, i.op_str)
+
+                f.write("0x%x:" % baseAddr)
+                f.write(s)
+                f.write("\n")
+            f.write("----------------------------------------------------------------------------\n")
 
     return 0
 
