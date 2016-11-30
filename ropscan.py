@@ -2,6 +2,7 @@ import os, sys
 import collections
 import pprint
 import re
+import platform
 from capstone import *
 from capstone.x86 import *
 
@@ -82,8 +83,16 @@ def linearScan(roplen, data):
     global gadgetList
     count = 0
     gadget = collections.deque([None]*roplen, roplen)
+    arch = None
+    if platform.architecture()[0] == "32bit":
+        arch = CS_MODE_32
+    elif platform.architecture()[0] == "64bit":
+        arch = CS_MODE_64
+    else:
+        print("Cannot find platform architecture")
+        sys.exit(1)
 
-    md = Cs(CS_ARCH_X86, CS_MODE_32) #TODO detect architecture automatically?
+    md = Cs(CS_ARCH_X86, arch)
     md.skipdata = True
     #start = int(0x340)
 
@@ -99,8 +108,8 @@ def linearScan(roplen, data):
             if i.mnemonic == "int" and i.op_str == "0x80" and i.address not in addr:
                 print("\t[*] Found int 0x80: 0x%x" % i.address)
                 addr.add(i.address)
-            if i.mnemonic == "sysenter" and i.address not in addr:
-                print("\t[*] Found sysenter: 0x%x" % i.address)
+            if (i.mnemonic == "sysenter" or i.mnemonic == "syscall") and i.address not in addr:
+                print("\t[*] Found %s: 0x%x" % (i.mnemonic, i.address))
                 addr.add(i.address)
 
             gadget.append(i)
