@@ -9,14 +9,14 @@ from capstone.x86 import *
 MAX_GADGET_LEN = 6
 MAX_GADGETS = 10000
 MAX_INSTRUCTION_LEN = 10
-MAX_SCANS = 5
-GADGET_TYPES = [X86_INS_RET]# X86_INS_CALL]
+MAX_SCANS = 6
+GADGET_TYPES = [X86_INS_RET, X86_INS_CALL]
 BINARY_RET = "0xc3"
 
-FILTER_INSTR = ["enter", "leave", ".byte"]
+FILTER_INSTR = ["enter", "leave", "push", ".byte"]
 #we need gadgets to set these regs, and one to call syscall
 REQUIRED_GADGETS = ["rax", "rdi", "rsi", "rdx"]
-
+#TODO fix addresses for instruction scan
 class GadgetList:
     def __init__(self, logfile):
         self.set = set()
@@ -51,11 +51,14 @@ class GadgetList:
             while None in gadget: #remove Nones
                 gadget.remove(None)
 
+            if len(gadget) < 2:
+                return False
+
             self.logGadget(gadget)
+            self.checkGadget(gadget);
             self.gadgets[gadgetID].append(gadget)
             self.set.add(seq)
             self.size += 1
-            self.checkGadget(gadget);
             return True
 
         return False
@@ -65,18 +68,19 @@ class GadgetList:
             i = gadget[ind]
             g = list(gadget)[ind:] #only need part of this gadget
             seq = self.serializeInstructions(g)
-            if seq in self.set:
+            if seq in self.set or not g:
                 continue
             info = self.getGadgetInfo(g)
+
             if i.mnemonic == "pop" and i.op_str.lower() in REQUIRED_GADGETS:
                 self.useful_gadgets[i.op_str.lower()].append(g)
                 self.set.add(seq)
-                print("[*] Found Gadget %s" % info)
+                print("[*] Found %s Gadget %s" % (i.op_str, info))
 
             if i.mnemonic == "syscall" and ind+2 == len(gadget): #try to find just syscall ; ret
                 self.useful_gadgets["syscall"].append(g)
                 self.set.add(seq)
-                print("[*] Found Gadget %s" % info)
+                print("[*] Found syscall Gadget %s" % info)
                 return
             #TODO add support for mov gadgets
 
@@ -109,6 +113,20 @@ class GadgetScanner:
         self.data = d
         self.gadgetList = glist
 
+    def initScanner(self):
+        arch = None
+        if platform.architecture()[0] == "32bit":
+            arch = CS_MODE_32
+        elif platform.architecture()[0] == "64bit":
+            arch = CS_MODE_64
+        else:
+            print("Cannot find platform architecture")
+            sys.exit(1)
+
+        md = Cs(CS_ARCH_X86, arch)
+        md.skipdata = True
+        return md
+
     def instructionScan(self, roplen, data, instruction): #"0xc3"
         hex_data =  " ".join(hex(ord(n)) for n in data)
         #inds = [m.start() for m in re.finditer("0xc3", hex_data)]
@@ -119,7 +137,9 @@ class GadgetScanner:
             if arr[i] == instruction:
                 inds.append(i)
 
-        blob = MAX_INSTRUCTION_LEN * MAX_GADGET_LEN
+        #print(inds)
+        #blob = MAX_INSTRUCTION_LEN * MAX_GADGET_LEN
+        blob = 25
         offsets = []
         for i in inds:
             start = i - blob
@@ -132,41 +152,42 @@ class GadgetScanner:
             if start < 0:
                 continue
             #print("scanning %d->%d" % (start, end))
-            self.linearScan(MAX_GADGET_LEN, data[start:end])
+            self.scanSection(roplen, data[start:end])
 
-    def linearScan(self, roplen, data):
+    def scanSection(self, roplen, blob):
+        md = self.initScanner()
+        start = len(blob) - 2
+
+        for i in range(0, MAX_SCANS):
+            if start < 0:
+                break
+            data = blob[start:]
+            instr = md.disasm(data,0)
+            self.handleInstructions(instr, roplen)
+            start -= 3
+
+    def linearScan(self, roplen, data, offset=0):
         count = 0
-        gadget = collections.deque([None]*roplen, roplen)
-        arch = None
-        if platform.architecture()[0] == "32bit":
-            arch = CS_MODE_32
-        elif platform.architecture()[0] == "64bit":
-            arch = CS_MODE_64
-        else:
-            print("Cannot find platform architecture")
-            sys.exit(1)
-
-        md = Cs(CS_ARCH_X86, arch)
-        md.skipdata = True
         #md.detail = True
-        #start = int(0x340)
+        #start = int(0xac0)
+        md = self.initScanner()
+        instructions = md.disasm(data, offset)
+        self.handleInstructions(instructions, roplen)
 
-        addr = set()
-        for offset in range(0,MAX_SCANS): #instructions eventually converge
-            #print("Scan %d" % offset)
-            instructions = md.disasm(data, offset)
-            for i in instructions:
-                if i.mnemonic in FILTER_INSTR or "j" in i.mnemonic: #filter jumps
-                    gadget = collections.deque([None]*roplen, roplen) #reset
-                    continue
+    def handleInstructions(self, instructions, roplen):
+        gadget = collections.deque([None]*roplen, roplen)
+        for i in instructions:
+            if i.mnemonic in FILTER_INSTR or "j" in i.mnemonic: #filter jumps
+                gadget = collections.deque([None]*roplen, roplen) #reset
+                continue
 
-                gadget.append(i)
-                #print("0x%x:\t%s\t%s [%d]" % (i.address, i.mnemonic, i.op_str, i.id))
-                if i.id in GADGET_TYPES:
-                    #print("\t[*] Found %s" % self.gadgetList.getGadgetInfo(gadget))
-                    if "0x" not in i.op_str and "[" not in i.op_str: #dont want call to have certain args
-                        self.gadgetList.addGadget(gadget,i.id)
-                    gadget = collections.deque([None]*roplen, roplen) #reset
+            gadget.append(i)
+            #print("0x%x:\t%s\t%s [%d]" % (i.address, i.mnemonic, i.op_str, i.id))
+            if i.id in GADGET_TYPES:
+                #print("\t[*] Found %s" % self.gadgetList.getGadgetInfo(gadget))
+                if "0x" not in i.op_str and "[" not in i.op_str: #dont want call to have certain args
+                    self.gadgetList.addGadget(gadget,i.id)
+                gadget = collections.deque([None]*roplen, roplen) #reset
 
 def main():
 
@@ -182,21 +203,24 @@ def main():
     with open(sys.argv[1], "rb") as f:
         data = f.read()
 
-    gadgetList = GadgetList(logfile)
-    gadgetScanner = GadgetScanner(data, gadgetList);
-    gadgetScanner.linearScan(MAX_GADGET_LEN, data)
-    '''
-    gl2 = GadgetList(logfile)
-    gs2 = GadgetScanner(data, gl2);
+    logfile2 = open("gadgets2.txt", "w")
 
-    gadgetScanner.instructionScan(MAX_GADGETS, data, BINARY_RET)
-    gs2.linearScan(MAX_GADGET_LEN, data)
+    #gadgetList = GadgetList(logfile)
+    #gadgetScanner = GadgetScanner(data, gadgetList);
+    #gadgetScanner.linearScan(MAX_GADGET_LEN, data)
 
-    gadgetList.out.close()
+    gadgetList2 = GadgetList(logfile)
+    gadgetScanner2 = GadgetScanner(data, gadgetList2);
+    gadgetScanner2.instructionScan(MAX_GADGET_LEN, data, BINARY_RET)
+    #print("Doing linear scan")
+    #gs2.linearScan(MAX_GADGET_LEN, data)
 
-    print("Linear Scan: %d unique gadgets\nInstruction Scan: %d unique gadgets" % (gl2.size, gadgetList.size))
-    '''
-    print("Found %d Unique Gadgets" % gadgetList.size)
+    #gadgetList.out.close()
+    #gadgetList2.out.close()
+
+    #print("Linear Scan: %d unique gadgets\nInstruction Scan: %d unique gadgets" % (gadgetList.size, gadgetList2.size))
+
+    print("Found %d Unique Gadgets" % gadgetList2.size)
     return 0
 
 if __name__ == '__main__':
