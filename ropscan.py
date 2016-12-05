@@ -75,12 +75,12 @@ class GadgetList:
             if i.mnemonic == "pop" and i.op_str.lower() in REQUIRED_GADGETS:
                 self.useful_gadgets[i.op_str.lower()].append(g)
                 self.set.add(seq)
-                print("[*] Found %s Gadget %s" % (i.op_str, info))
+                print("[*] Found %s Gadget (%s)" % (i.op_str, info))
 
             if i.mnemonic == "syscall" and ind+2 == len(gadget): #try to find just syscall ; ret
                 self.useful_gadgets["syscall"].append(g)
                 self.set.add(seq)
-                print("[*] Found syscall Gadget %s" % info)
+                print("[*] Found syscall Gadget (%s)" % info)
                 return
             #TODO add support for mov gadgets
 
@@ -127,7 +127,7 @@ class GadgetScanner:
         md.skipdata = True
         return md
 
-    def instructionScan(self, roplen, data, instruction): #"0xc3"
+    def instructionScan(self, data, instruction): #"0xc3"
         hex_data =  " ".join(hex(ord(n)) for n in data)
         #inds = [m.start() for m in re.finditer("0xc3", hex_data)]
 
@@ -137,7 +137,6 @@ class GadgetScanner:
             if arr[i] == instruction:
                 inds.append(i)
 
-        #print(inds)
         #blob = MAX_INSTRUCTION_LEN * MAX_GADGET_LEN
         blob = 25
         offsets = []
@@ -152,9 +151,9 @@ class GadgetScanner:
             if start < 0:
                 continue
             #print("scanning %d->%d" % (start, end))
-            self.scanSection(roplen, data[start:end])
+            self.scanSection(data[start:end], start)
 
-    def scanSection(self, roplen, blob):
+    def scanSection(self, blob, offset):
         md = self.initScanner()
         start = len(blob) - 2
 
@@ -163,31 +162,33 @@ class GadgetScanner:
                 break
             data = blob[start:]
             instr = md.disasm(data,0)
-            self.handleInstructions(instr, roplen)
+            self.handleInstructions(instr, offset + start)
             start -= 3
 
-    def linearScan(self, roplen, data, offset=0):
+    def linearScan(self, data, offset=0):
         count = 0
         #md.detail = True
         #start = int(0xac0)
         md = self.initScanner()
         instructions = md.disasm(data, offset)
-        self.handleInstructions(instructions, roplen)
+        self.handleInstructions(instructions)
 
-    def handleInstructions(self, instructions, roplen):
-        gadget = collections.deque([None]*roplen, roplen)
+    def handleInstructions(self, instructions, offset=0):
+        gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN)
         for i in instructions:
             if i.mnemonic in FILTER_INSTR or "j" in i.mnemonic: #filter jumps
-                gadget = collections.deque([None]*roplen, roplen) #reset
+                gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
                 continue
 
+            #i.address += offset
+            #print(str(hex(i.address+offset)))
             gadget.append(i)
             #print("0x%x:\t%s\t%s [%d]" % (i.address, i.mnemonic, i.op_str, i.id))
             if i.id in GADGET_TYPES:
                 #print("\t[*] Found %s" % self.gadgetList.getGadgetInfo(gadget))
                 if "0x" not in i.op_str and "[" not in i.op_str: #dont want call to have certain args
                     self.gadgetList.addGadget(gadget,i.id)
-                gadget = collections.deque([None]*roplen, roplen) #reset
+                gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
 
 def main():
 
@@ -211,9 +212,9 @@ def main():
 
     gadgetList2 = GadgetList(logfile)
     gadgetScanner2 = GadgetScanner(data, gadgetList2);
-    gadgetScanner2.instructionScan(MAX_GADGET_LEN, data, BINARY_RET)
+    gadgetScanner2.instructionScan(data, BINARY_RET)
     #print("Doing linear scan")
-    #gs2.linearScan(MAX_GADGET_LEN, data)
+    #gs2.linearScan(data)
 
     #gadgetList.out.close()
     #gadgetList2.out.close()
