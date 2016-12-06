@@ -10,10 +10,10 @@ MAX_GADGET_LEN = 6
 MAX_GADGETS = 10000
 MAX_INSTRUCTION_LEN = 10
 MAX_SCANS = 6
-GADGET_TYPES = [X86_INS_RET, X86_INS_CALL]
+GADGET_TYPES = ["ret"]
 BINARY_RET = "0xc3"
 
-FILTER_INSTR = ["enter", "leave", "push", ".byte"]
+FILTER_INSTR = ["enter", "leave", "push", ".byte", "call"]
 #we need gadgets to set these regs, and one to call syscall
 REQUIRED_GADGETS = ["rax", "rdi", "rsi", "rdx"]
 #TODO fix addresses for instruction scan
@@ -35,7 +35,7 @@ class GadgetList:
         seq = list()
         for i in gadget:
             if i: #skip None
-                tup = (i.id, i.op_str)
+                tup = (i[1], i[2])
                 seq.append(tup)
 
         h = hash(tuple(seq))
@@ -72,12 +72,12 @@ class GadgetList:
                 continue
             info = self.getGadgetInfo(g)
 
-            if i.mnemonic == "pop" and i.op_str.lower() in REQUIRED_GADGETS:
-                self.useful_gadgets[i.op_str.lower()].append(g)
+            if i[1] == "pop" and i[2].lower() in REQUIRED_GADGETS:
+                self.useful_gadgets[i[2].lower()].append(g)
                 self.set.add(seq)
-                print("[*] Found %s Gadget (%s)" % (i.op_str, info))
+                print("[*] Found %s Gadget (%s)" % (i[2], info))
 
-            if i.mnemonic == "syscall" and ind+2 == len(gadget): #try to find just syscall ; ret
+            if i[1] == "syscall" and ind+2 == len(gadget): #try to find just syscall ; ret
                 self.useful_gadgets["syscall"].append(g)
                 self.set.add(seq)
                 print("[*] Found syscall Gadget (%s)" % info)
@@ -99,8 +99,8 @@ class GadgetList:
             if not i:
                 continue
             if not baseAddr:
-                baseAddr = i.address
-            s += " %s %s ;" % (i.mnemonic, i.op_str)
+                baseAddr = i[0]
+            s += " %s %s ;" % (i[1], i[2])
 
         if not baseAddr:
             return None
@@ -161,7 +161,7 @@ class GadgetScanner:
             if start < 0:
                 break
             data = blob[start:]
-            instr = md.disasm(data,0)
+            instr = md.disasm_lite(data, 0)
             self.handleInstructions(instr, offset + start)
             start -= 3
 
@@ -170,24 +170,26 @@ class GadgetScanner:
         #md.detail = True
         #start = int(0xac0)
         md = self.initScanner()
-        instructions = md.disasm(data, offset)
+        instructions = md.disasm_lite(data, offset)
         self.handleInstructions(instructions)
 
     def handleInstructions(self, instructions, offset=0):
         gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN)
-        for i in instructions:
-            if i.mnemonic in FILTER_INSTR or "j" in i.mnemonic: #filter jumps
+
+        for (addr, size, mnem, ops) in instructions:
+            i = (addr, mnem, ops)
+            if i[1] in FILTER_INSTR or "j" in i[1]: #filter jumps
                 gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
                 continue
 
-            #i.address += offset
-            #print(str(hex(i.address+offset)))
+            #i[0] += offset
+            #print(str(hex(i[0]+offset)))
             gadget.append(i)
-            #print("0x%x:\t%s\t%s [%d]" % (i.address, i.mnemonic, i.op_str, i.id))
-            if i.id in GADGET_TYPES:
+            #print("0x%x:\t%s\t%s [%d]" % (i[0], i[1], i[2], i.id))
+            if i[1] in GADGET_TYPES:
                 #print("\t[*] Found %s" % self.gadgetList.getGadgetInfo(gadget))
-                if "0x" not in i.op_str and "[" not in i.op_str: #dont want call to have certain args
-                    self.gadgetList.addGadget(gadget,i.id)
+                if "0x" not in i[2] and "[" not in i[2]: #dont want call to have certain args
+                    self.gadgetList.addGadget(gadget,i[1])
                 gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
 
 def main():
