@@ -10,7 +10,7 @@ MAX_GADGET_LEN = 6
 MAX_GADGETS = 10000
 MAX_INSTRUCTION_LEN = 10
 MAX_SCANS = 6
-GADGET_TYPES = ["ret"]
+GADGET_TYPES = ["ret", "int"]
 BINARY_RET = "0xc3"
 JUNK = 0x41 #"A"
 FILTER_INSTR = ["enter", "leave", "push", ".byte", "call"]
@@ -313,7 +313,9 @@ class GadgetScanner:
             #print("0x%x:\t%s\t%s [%d]" % (i[0], i[1], i[2], i.id))
             if i[1] in GADGET_TYPES:
                 #print("\t[*] Found %s" % self.gadgetList.getGadgetInfo(gadget))
-                if "0x" not in i[2]: #dont want call to have certain args
+                if i[1] == "int" and i[2] == "0x80":
+                    self.gadgetList.addGadget(gadget,i[1])
+                elif "0x" not in i[2]: #dont want call to have certain args
                     self.gadgetList.addGadget(gadget,i[1])
                 gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
 
