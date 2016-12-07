@@ -12,11 +12,13 @@ MAX_INSTRUCTION_LEN = 10
 MAX_SCANS = 6
 GADGET_TYPES = ["ret"]
 BINARY_RET = "0xc3"
-
+JUNK = 0x41 #"A"
 FILTER_INSTR = ["enter", "leave", "push", ".byte", "call"]
 #we need gadgets to set these regs, and one to call syscall
 REQUIRED_GADGETS = ["rax", "rdi", "rsi", "rdx"]
-#TODO fix addresses for instruction scan
+
+MPROTECT_ARGS = {"rax": 10, "rdi": 0xffff, "rsi": 4096, "rdx": 4} #rdi should be address of shellcode
+
 class GadgetList:
     def __init__(self, logfile):
         self.set = set()
@@ -40,6 +42,116 @@ class GadgetList:
 
         h = hash(tuple(seq))
         return h
+
+    def createROPChain(self):
+        chain = []
+        required = []
+        #sort so smallest chain is first
+        for v in self.useful_gadgets.values():
+            v.sort(key=lambda x: len(x))
+
+        if len(self.useful_gadgets["syscall"]) == 0:
+            print("ERROR: Cannot find gadget for syscall!")
+            return None
+
+        independent_gadgets = dict()
+        for req in REQUIRED_GADGETS:
+            if req not in self.useful_gadgets:
+                print("ERROR: cannot find gadget to setup %s" % reg)
+                return None
+
+            gadget = self.findPopRet(self.useful_gadgets[req])
+            if gadget:
+                independent_gadgets[req] = gadget
+            else:
+                required.append(req)
+
+        # at this point, all easy (pop ; ret) gadgets are added to chain.
+        # if rax is still needed, search for (xor ; add 1) chain.
+        #if "rax" in required:
+        #    gadget = self.findXorAddChain(self.useful_gadgets["rax"])
+
+        # TODO if a simple pop gadget cannot be found, try finding a simple mov gadget
+        # search through longer pop chains as long as they dont mess up stack
+        conflict_regs = []
+        found = []
+        for req in required:
+            options = self.useful_gadgets[req]
+            for option in options:
+                first = option[0]
+                if first[1] == "pop": #or mov
+                    regs = self.getConflictingRegs(option[1:], independent_gadgets.keys())
+                    for reg in regs:
+                        if reg in conflict_regs:
+                            #cant use this gadget b/c we need it
+                            continue
+                        conflict_regs.append(reg)
+                    found.append(req)
+                    chain.append((req, option))
+                    break
+
+        for f in found:
+            required.remove(f)
+
+        if len(required) > 0:
+            print("ERROR: Unable to find gadgets for: %s" % required)
+
+        stack = []
+        print("\nDependent Gadgets:")
+        for (register, gadget) in chain:
+            print(self.getGadgetInfo(gadget))
+            stack += self.formatPopArgs(gadget, register)
+
+        print("\nIndependent Gadgets:")
+        for (register, gadget) in independent_gadgets.iteritems():
+            print(self.getGadgetInfo(gadget))
+            stack += self.formatPopArgs(gadget, register)
+
+        syscall = self.useful_gadgets["syscall"][0]
+        print(self.getGadgetInfo(syscall))
+        stack.append(syscall[0][0])
+
+        print("\nSTACK:")
+        for addr in stack:
+            print("0x%x" % int(addr))
+
+    def formatPopArgs(self, gadget, register):
+        if register not in MPROTECT_ARGS:
+            print("Error: Unknown register %s" % register)
+            sys.exit(1)
+
+        stack = []
+        stack.append(gadget[0][0]) #address
+        stack.append(MPROTECT_ARGS[register])
+        for g in gadget[1:]:
+            if g[1] == "pop":
+                stack.append(JUNK)
+        return stack
+
+    def getConflictingRegs(self, chain, independent_gadgets):
+        res = []
+        for instr in chain:
+            arr = instr[2].split(",")
+            for a in arr:
+                reg = a.strip(" ")
+                if reg in REQUIRED_GADGETS and reg not in independent_gadgets:
+                    print("Conflicting Reg %s" % reg)
+                    res.append(reg)
+        return res
+
+    def findPopRet(self, gadgets):
+        for gadget in gadgets:
+            if len(gadget) > 2:
+                continue #only trying to find simple gadgets...
+
+            i1 = gadget[0]
+            i2 = gadget[1]
+            if i1[1] != "pop" or i2[1] != "ret":
+                continue
+
+            return gadget
+
+        return None
 
     def addGadget(self, gadget, gadgetID):
         if self.size > MAX_GADGETS:
@@ -77,12 +189,28 @@ class GadgetList:
                 self.set.add(seq)
                 print("[*] Found %s Gadget (%s)" % (i[2], info))
 
-            if i[1] == "syscall" and ind+2 == len(gadget): #try to find just syscall ; ret
+            if i[1] == "syscall" and len(g) == 2: #try to find just syscall ; ret
                 self.useful_gadgets["syscall"].append(g)
                 self.set.add(seq)
                 print("[*] Found syscall Gadget (%s)" % info)
                 return
-            #TODO add support for mov gadgets
+
+            if i[1] == "xor" and i[2].lower() == "rax, rax" and len(g) == 2:
+                self.useful_gadgets["rax"].append(g)
+                self.set.add(seq)
+                #print("[*] Found xor Gadget (%s)" % info)
+                return
+
+            if i[1] == "add" and len(g) == 2:
+                if i[2].lower() == "rax, 1" or i[2].lower() == "al, 1":
+                    self.useful_gadgets["rax"].append(g)
+                    self.set.add(seq)
+                    #print("[*] Found add Gadget (%s)" % info)
+                    return
+
+            if i[1] == "mov" and "rax," in i[2].lower() and len(g) == 2:
+                self.useful_gadgets["rax"].append(g)
+                self.set.add(seq)
 
     def logGadget(self, gadget):
         s = self.getGadgetInfo(gadget)
@@ -163,12 +291,11 @@ class GadgetScanner:
             data = blob[start:]
             instr = md.disasm_lite(data, 0)
             self.handleInstructions(instr, offset + start)
-            start -= 3
+            start -= 2
 
     def linearScan(self, data, offset=0):
         count = 0
         #md.detail = True
-        #start = int(0xac0)
         md = self.initScanner()
         instructions = md.disasm_lite(data, offset)
         self.handleInstructions(instructions)
@@ -177,18 +304,16 @@ class GadgetScanner:
         gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN)
 
         for (addr, size, mnem, ops) in instructions:
-            i = (addr, mnem, ops)
-            if i[1] in FILTER_INSTR or "j" in i[1]: #filter jumps
+            if mnem in FILTER_INSTR or "j" in mnem or "[" in ops: #filter all jumps, relative instructions
                 gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
                 continue
 
-            #i[0] += offset
-            #print(str(hex(i[0]+offset)))
+            i = (addr + offset, mnem, ops)
             gadget.append(i)
             #print("0x%x:\t%s\t%s [%d]" % (i[0], i[1], i[2], i.id))
             if i[1] in GADGET_TYPES:
                 #print("\t[*] Found %s" % self.gadgetList.getGadgetInfo(gadget))
-                if "0x" not in i[2] and "[" not in i[2]: #dont want call to have certain args
+                if "0x" not in i[2]: #dont want call to have certain args
                     self.gadgetList.addGadget(gadget,i[1])
                 gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
 
@@ -206,24 +331,13 @@ def main():
     with open(sys.argv[1], "rb") as f:
         data = f.read()
 
-    logfile2 = open("gadgets2.txt", "w")
+    gadgetList = GadgetList(logfile)
+    gadgetScanner = GadgetScanner(data, gadgetList);
+    gadgetScanner.instructionScan(data, BINARY_RET)
+    print("\nROP CHAIN:")
+    gadgetList.createROPChain()
 
-    #gadgetList = GadgetList(logfile)
-    #gadgetScanner = GadgetScanner(data, gadgetList);
-    #gadgetScanner.linearScan(MAX_GADGET_LEN, data)
-
-    gadgetList2 = GadgetList(logfile)
-    gadgetScanner2 = GadgetScanner(data, gadgetList2);
-    gadgetScanner2.instructionScan(data, BINARY_RET)
-    #print("Doing linear scan")
-    #gs2.linearScan(data)
-
-    #gadgetList.out.close()
-    #gadgetList2.out.close()
-
-    #print("Linear Scan: %d unique gadgets\nInstruction Scan: %d unique gadgets" % (gadgetList.size, gadgetList2.size))
-
-    print("Found %d Unique Gadgets" % gadgetList2.size)
+    print("\nFound %d Unique Gadgets" % gadgetList.size)
     return 0
 
 if __name__ == '__main__':
