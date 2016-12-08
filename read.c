@@ -10,7 +10,7 @@ int main() {
     char buf[4];
     int fd;
     fd = open("in.txt", O_RDONLY);
-    read(fd, buf, 64);
+    read(fd, buf, 200);
     return 0;
 }
 

