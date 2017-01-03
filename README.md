@@ -13,7 +13,7 @@ A proof of concept example is also included in this repo.
 Currently, the ROP Chain Compiler only supports scanning for 64-bit binaries.
 
 ## Prerequites
-    - Captone Disassembly Framework
+    - Capstone Disassembly Framework
       (http://www.capstone-engine.org/download.html)
 
 ## Running

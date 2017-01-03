@@ -1,10 +1,6 @@
 CC=gcc
 
-all: vuln read
-
-vuln: vuln.c
-	sudo bash -c "echo 0 > /proc/sys/kernel/randomize_va_space"
-	gcc -g -fno-stack-protector  -o vuln vuln.c
+all: read
 
 read: read.c
 	sudo bash -c "echo 0 > /proc/sys/kernel/randomize_va_space"
@@ -12,4 +8,4 @@ read: read.c
 
 
 clean:
-	rm vuln read
+	rm read
